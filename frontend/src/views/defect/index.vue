@@ -3,10 +3,9 @@
     <header class="page-head">
       <div>
         <h2>缺陷消缺管理</h2>
-        <p class="page-desc">维护消缺任务，围绕缺陷编号、缺陷类别、发现方式、严重等级做登记、筛选与状态流转。</p>
+        <p class="page-desc">巡视复核派生的消缺单自动进入待派台账；派发后回写巡视侧台账行状态，两处异常项数与派单条数保持一致。</p>
       </div>
       <div class="page-actions">
-        <button class="btn primary" type="button" @click="openCreate">登记消缺任务</button>
         <button class="btn" type="button" @click="exportRows">导出缺陷消缺清单</button>
       </div>
     </header>
@@ -23,6 +22,8 @@
         {{ item.status }}：{{ item.count }}
       </span>
     </p>
+
+    <div v-if="banner" class="banner" :class="banner.kind">{{ banner.text }}</div>
 
     <form class="filter-bar" @submit.prevent="reload">
       <label v-for="field in filterFields" :key="field" class="filter-item">
@@ -43,11 +44,17 @@
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)">
-          <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td v-for="column in columns" :key="column">
+            <template v-if="column === '来源巡视单号'">
+              <button v-if="row[column]" class="link" type="button" @click="showSource(row)">{{ row[column] }}</button>
+              <span v-else class="muted-text">非巡视派生</span>
+            </template>
+            <template v-else>{{ row[column] ?? '—' }}</template>
+          </td>
           <td>{{ row.status }}</td>
           <td class="row-actions">
             <button
-              v-for="action in actions"
+              v-for="action in availableActions(row)"
               :key="action"
               class="link"
               type="button"
@@ -58,14 +65,29 @@
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 2" class="empty-state">暂无缺陷消缺数据，可先登记消缺任务</td>
+          <td :colspan="columns.length + 2" class="empty-state">暂无缺陷消缺数据</td>
         </tr>
       </tbody>
     </table>
 
+    <div v-if="source" class="detail-panel">
+      <header style="display:flex;justify-content:space-between;align-items:center">
+        <h3>来源巡视单：{{ source.巡视单号 }}</h3>
+        <button class="btn ghost" type="button" @click="source = null">关闭</button>
+      </header>
+      <dl class="detail-grid">
+        <div><dt>巡视路线</dt><dd>{{ source.巡视路线 }}</dd></div>
+        <div><dt>巡视人员</dt><dd>{{ source.巡视人员 }}</dd></div>
+        <div><dt>巡视日期</dt><dd>{{ source.巡视日期 }}</dd></div>
+        <div><dt>异常项数</dt><dd>{{ source.异常项数 }}</dd></div>
+        <div><dt>巡视状态</dt><dd>{{ source.status }}</dd></div>
+        <div><dt>待派台账</dt><dd>{{ source['待派台账状态'] ?? '未建立' }}（{{ source.派单数 ?? 0 }} 张）</dd></div>
+      </dl>
+      <p class="muted-text" style="font-size:12px;margin:4px 0 0">来源巡视单每次实时查询；取不到会明确报错并允许重试，不会显示旧数据。</p>
+    </div>
+
     <footer class="page-foot">
-      <span>共 {{ total }} 条缺陷消缺记录</span>
-      <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
+      <span>共 {{ total }} 条缺陷消缺记录 · 待派发 {{ pendingCount }} 条来自巡视待派台账</span>
     </footer>
   </section>
 </template>
@@ -74,6 +96,7 @@
 import { computed, onMounted, ref } from 'vue'
 
 import {
+  defectSourcePatrol,
   downloadEntries,
   listEntries,
   moduleMeta,
@@ -82,22 +105,39 @@ import {
 import type { EntryRow } from '@/data/types'
 
 const meta = moduleMeta('defect')
-const columns = ["缺陷编号", "缺陷类别", "发现方式", "严重等级", "责任班组", "要求完成日", "消缺措施", "消缺状态"]
-const actions = ["派发消缺", "提交验收", "确认闭环"]
-const statuses = ["待派发", "消缺中", "待验收", "已闭环"]
-const stats = [{"label": "待派发缺陷", "value": 0}, {"label": "消缺中缺陷", "value": 0}, {"label": "超期未闭环", "value": 0}]
+const columns = ['缺陷编号', '缺陷类别', '发现方式', '严重等级', '责任班组', '要求完成日', '消缺措施', '来源巡视单号', '消缺状态']
 
 const rows = ref<EntryRow[]>([])
 const total = ref(0)
-const errorMessage = ref('')
+const banner = ref<{ kind: 'ok' | 'error' | 'warn'; text: string } | null>(null)
 const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+const filterFields = ['缺陷编号', '缺陷类别', '来源巡视单号']
+const source = ref<EntryRow | null>(null)
+
+const stats = computed(() => [
+  { label: '待派发缺陷', value: rows.value.filter((row) => String(row.status) === '待派发').length },
+  { label: '消缺中缺陷', value: rows.value.filter((row) => String(row.status) === '消缺中').length },
+  { label: '巡视派生单', value: rows.value.filter((row) => Boolean(row.来源巡视单号)).length },
+])
+const pendingCount = computed(() => rows.value.filter((row) => String(row.status) === '待派发' && row.来源巡视单号).length)
+
+const statusOrder = ['待派发', '消缺中', '待验收', '已闭环']
 const statusSummary = computed(() =>
-  statuses.map((status: string) => ({
+  statusOrder.map((status: string) => ({
     status,
     count: rows.value.filter((row) => String(row.status) === status).length,
   })),
 )
+
+function availableActions(row: EntryRow): string[] {
+  const map: Record<string, string[]> = {
+    待派发: ['派发消缺'],
+    消缺中: ['提交验收'],
+    待验收: ['确认闭环'],
+    已闭环: [],
+  }
+  return map[String(row.status)] ?? []
+}
 
 function resetFilters() {
   filters.value = {}
@@ -108,28 +148,31 @@ function exportRows() {
   downloadEntries(meta.key)
 }
 
-function openCreate() {
-  errorMessage.value = '消缺任务登记入口尚未接入审批流'
+function showSource(row: EntryRow) {
+  banner.value = null
+  try {
+    source.value = defectSourcePatrol(Number(row.id))
+  } catch (error) {
+    source.value = null
+    banner.value = { kind: 'error', text: error instanceof Error ? error.message : '来源巡视单取不到，请重试' }
+  }
 }
 
 function runAction(action: string, row: EntryRow) {
-  errorMessage.value = ''
+  banner.value = null
   const result = applyAction(meta.key, Number(row.id), action)
-  if (!result.ok) {
-    errorMessage.value = result.message
-    return
-  }
+  banner.value = { kind: result.ok ? 'ok' : 'error', text: result.message }
   reload()
 }
 
 function reload() {
-  errorMessage.value = ''
+  banner.value = null
   try {
     const payload = listEntries(meta.key, filters.value)
     rows.value = payload.items
     total.value = payload.total
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '缺陷消缺列表读取失败'
+    banner.value = { kind: 'error', text: error instanceof Error ? error.message : '缺陷消缺列表读取失败' }
   }
 }
 
