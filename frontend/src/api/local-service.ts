@@ -1,9 +1,26 @@
 import { MODULE_BY_KEY } from '@/data/modules'
 import { allRows, listRows, resetRows, saveRows } from '@/data/local-store'
 import type { ActionResult, EntryRow, ModuleMeta, OverviewResult, PageResult } from '@/data/types'
+import {
+  isPatrolDerivedDefect,
+  retryDefectLinkage,
+  runPatrolAction,
+  syncLedgerStatus,
+} from './patrol-review'
 
 // 会写进数据的「往回走」动作：命中就把这条记录标成异常态，看板上能一眼看出来。
 const NEGATIVE_ACTIONS = ['撤销', '作废', '拒绝', '驳回', '停用', '忽略', '下线', '回滚']
+
+// 当前操作人：页面切换值班人员后写进来，巡视复核的本路线/不相容岗位校验都认它。
+let currentOperator = '值班管理员'
+
+export function setOperator(name: string): void {
+  currentOperator = name.trim() || '值班管理员'
+}
+
+export function getOperator(): string {
+  return currentOperator
+}
 
 export function moduleMeta(key: string): ModuleMeta {
   const meta = MODULE_BY_KEY.get(key)
@@ -30,6 +47,17 @@ export function listEntries(key: string, filters: Record<string, string> = {}): 
 
 export function runAction(key: string, id: number, action: string): ActionResult {
   const meta = moduleMeta(key)
+
+  // 巡视单动作全部走复核派单领域服务：跳级拦截、派过单拒收、本路线/不相容岗位校验都在里面。
+  if (key === 'patrol') {
+    return runPatrolAction(id, action, currentOperator)
+  }
+
+  // 断流的派生消缺单：重试关联，不拿旧数据顶。
+  if (key === 'defect' && action === '重试关联') {
+    return retryDefectLinkage(id)
+  }
+
   const target = meta.actionTargets[action]
   if (!target) {
     return { ok: false, message: `${meta.entity}没有登记「${action}」这个动作` }
@@ -53,6 +81,12 @@ export function runAction(key: string, id: number, action: string): ActionResult
   const next = [...rows]
   next[index] = updated
   saveRows(key, next)
+
+  // 派生消缺单状态流转回写巡视单待派台账，两处始终一致。
+  if (key === 'defect' && isPatrolDerivedDefect(updated)) {
+    syncLedgerStatus(updated)
+  }
+
   return { ok: true, message: `${meta.entity}已${action}，当前状态「${target}」` }
 }
 

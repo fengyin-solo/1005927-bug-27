@@ -42,12 +42,12 @@
         </tr>
       </thead>
       <tbody>
-        <tr v-for="row in rows" :key="String(row.id)">
+        <tr v-for="row in rows" :key="String(row.id)" :class="{ 'row-abnormal': row.abnormal }">
           <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
           <td>{{ row.status }}</td>
           <td class="row-actions">
             <button
-              v-for="action in actions"
+              v-for="action in actionsFor(row)"
               :key="action"
               class="link"
               type="button"
@@ -62,6 +62,8 @@
         </tr>
       </tbody>
     </table>
+
+    <p v-if="orphanHint" class="warn-bar">{{ orphanHint }}</p>
 
     <footer class="page-foot">
       <span>共 {{ total }} 条缺陷消缺记录</span>
@@ -79,11 +81,11 @@ import {
   moduleMeta,
   runAction as applyAction,
 } from '@/api/local-service'
+import { isPatrolDerivedDefect } from '@/api/patrol-review'
 import type { EntryRow } from '@/data/types'
 
 const meta = moduleMeta('defect')
-const columns = ["缺陷编号", "缺陷类别", "发现方式", "严重等级", "责任班组", "要求完成日", "消缺措施", "消缺状态"]
-const actions = ["派发消缺", "提交验收", "确认闭环"]
+const columns = ["缺陷编号", "缺陷类别", "发现方式", "严重等级", "责任班组", "要求完成日", "来源巡视单号", "来源项次", "消缺措施", "消缺状态"]
 const statuses = ["待派发", "消缺中", "待验收", "已闭环"]
 const stats = [{"label": "待派发缺陷", "value": 0}, {"label": "消缺中缺陷", "value": 0}, {"label": "超期未闭环", "value": 0}]
 
@@ -91,13 +93,51 @@ const rows = ref<EntryRow[]>([])
 const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+const filterFields = ["缺陷编号", "缺陷类别", "来源巡视单号"]
 const statusSummary = computed(() =>
   statuses.map((status: string) => ({
     status,
     count: rows.value.filter((row) => String(row.status) === status).length,
   })),
 )
+
+const orphanHint = computed(() => {
+  const orphans = rows.value.filter((row) => row.abnormal || row['关联状态'] === '关联失败')
+  if (!orphans.length) {
+    return ''
+  }
+  return `有 ${orphans.length} 张派生消缺单取不到对应巡视单：${orphans.map((row) => row['缺陷编号']).join('、')}。数据原样保留未覆盖，可用「重试关联」在巡视单补回后续挂。`
+})
+
+function actionsFor(row: EntryRow): string[] {
+  if (isPatrolDerivedDefect(row)) {
+    if (row.abnormal || row['关联状态'] === '关联失败') {
+      return ['重试关联']
+    }
+    const status = String(row.status)
+    if (status === '待派发') {
+      return ['派发消缺', '重试关联']
+    }
+    if (status === '消缺中') {
+      return ['提交验收']
+    }
+    if (status === '待验收') {
+      return ['确认闭环']
+    }
+    return []
+  }
+  const status = String(row.status)
+  if (status === '待派发') {
+    return ['派发消缺']
+  }
+  if (status === '消缺中') {
+    return ['提交验收']
+  }
+  if (status === '待验收') {
+    return ['确认闭环']
+  }
+  return []
+}
 
 function resetFilters() {
   filters.value = {}
